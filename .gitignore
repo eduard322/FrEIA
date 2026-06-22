@@ -1,3 +1,7 @@
+# MNIST PoC artifacts
+/data/
+mnist_samples.png
+
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/
