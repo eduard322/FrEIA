@@ -116,6 +116,110 @@ def sample_digits(inn: Ff.SequenceINN, mu: torch.Tensor, device: torch.device,
     print(f"Saved generated samples to {out_path}")
 
 
+def _class_centroids(proj, y):
+    """Mean 2-D position of each class's embedded points."""
+    import numpy as np
+    return np.stack([proj[y == c].mean(0) for c in range(N_CLASSES)])
+
+
+def _project_pca(z: torch.Tensor, mu: torch.Tensor, y):
+    """Top-2 PCA of the latent codes; project codes and the learned means alike.
+
+    The linear projection places the learned means faithfully, so the stars here
+    are the actual mu_y (the nearest-mean decision references).
+    """
+    mean = z.mean(0, keepdim=True)
+    zc = z - mean
+    _, s, v = torch.pca_lowrank(zc, q=2, center=False)
+    comps = v[:, :2]
+    proj = (zc @ comps).numpy()
+    stars = ((mu - mean) @ comps).numpy()
+    var = (s[:2] ** 2) / (zc ** 2).sum()
+    return (proj, stars, "learned class means",
+            f"PC1 ({var[0] * 100:.1f}% var)", f"PC2 ({var[1] * 100:.1f}% var)")
+
+
+def _project_tsne(z: torch.Tensor, mu: torch.Tensor, y):
+    """t-SNE embedding of the latent codes.
+
+    t-SNE is non-parametric and neighbour-preserving, so the learned means (which
+    sit near the origin relative to the spread-out data) would all collapse to the
+    centre. Instead the stars mark each class's empirical centroid in the
+    embedding, which is faithful to this 2-D view.
+    """
+    from sklearn.manifold import TSNE
+
+    perplexity = min(30, max(5, z.size(0) // 100))
+    proj = TSNE(n_components=2, init="pca", perplexity=perplexity,
+                random_state=0).fit_transform(z.numpy())
+    return proj, _class_centroids(proj, y), "class centroids", "t-SNE 1", "t-SNE 2"
+
+
+@torch.no_grad()
+def plot_latent(inn: Ff.SequenceINN, mu: torch.Tensor, loader: DataLoader,
+                device: torch.device, out_path: str, max_points: int,
+                method: str) -> None:
+    """Embed the test set's latent codes to 2-D and scatter them by class.
+
+    The flow warps each class to a unit Gaussian around its learned mean ``mu_y``;
+    this plot shows how well those clusters separate. Stars mark the class means.
+    ``method='tsne'`` (default) reveals cluster structure best; ``'pca'`` is a
+    dependency-free linear fallback but is dominated by the top-variance
+    directions, which need not be the class-separating ones.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    inn.eval()
+    zs, ys = [], []
+    for x, y in loader:
+        x = x.view(x.size(0), -1).to(device)
+        z, _ = inn(x)
+        zs.append(z.cpu())
+        ys.append(y)
+    z = torch.cat(zs, 0)
+    y = torch.cat(ys, 0)
+
+    if max_points and z.size(0) > max_points:
+        idx = torch.randperm(z.size(0))[:max_points]
+        z, y = z[idx], y[idx]
+    y = y.numpy()
+    mu_cpu = mu.detach().cpu()
+
+    project = _project_tsne if method == "tsne" else _project_pca
+    proj, stars, star_label, xlabel, ylabel = project(z, mu_cpu, y)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    cmap = plt.get_cmap("tab10")
+    for c in range(N_CLASSES):
+        m = y == c
+        ax.scatter(proj[m, 0], proj[m, 1], s=6, color=cmap(c),
+                   alpha=0.4, linewidths=0, label=str(c))
+    for c in range(N_CLASSES):
+        ax.scatter(stars[c, 0], stars[c, 1], s=240, color=cmap(c),
+                   marker="*", edgecolors="black", linewidths=1.2, zorder=5)
+        ax.annotate(str(c), (stars[c, 0], stars[c, 1]), color="black",
+                    fontsize=10, fontweight="bold", ha="center", va="center", zorder=6)
+
+    # Robust axis limits: clip to the 1st-99th percentile (+margin) of the data so
+    # a handful of far-flung latents can't crush everything into a dot.
+    lo, hi = np.percentile(proj, [1, 99], axis=0)
+    margin = 0.05 * (hi - lo)
+    ax.set_xlim(lo[0] - margin[0], hi[0] + margin[0])
+    ax.set_ylim(lo[1] - margin[1], hi[1] + margin[1])
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"MNIST test set in INN latent space ({method})\nstars = {star_label}")
+    ax.legend(title="digit", markerscale=2, loc="best", framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    print(f"Saved latent-space plot to {out_path}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--epochs", type=int, default=5)
@@ -127,6 +231,12 @@ def main() -> None:
     p.add_argument("--max-train", type=int, default=0,
                    help="if >0, cap the number of training images (for a quick run)")
     p.add_argument("--no-sample", action="store_true", help="skip generating samples")
+    p.add_argument("--plot-latent", action="store_true",
+                   help="save a 2-D scatter of the test set in latent space")
+    p.add_argument("--plot-method", choices=["tsne", "pca"], default="tsne",
+                   help="2-D embedding for the latent plot (tsne needs scikit-learn)")
+    p.add_argument("--plot-points", type=int, default=4000,
+                   help="max test points to scatter in the latent plot")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -169,6 +279,10 @@ def main() -> None:
 
     if not args.no_sample:
         sample_digits(inn, mu, device, per_class=10, out_path="mnist_samples.png")
+
+    if args.plot_latent:
+        plot_latent(inn, mu, test_loader, device, out_path="mnist_latent.png",
+                    max_points=args.plot_points, method=args.plot_method)
 
 
 if __name__ == "__main__":

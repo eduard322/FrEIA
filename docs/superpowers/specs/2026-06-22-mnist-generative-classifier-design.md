@@ -40,8 +40,19 @@ Trustworthy Image Classification") idea.
 6. Eval: test accuracy via the nearest-mean rule; print final accuracy
    (expect ~97–98%).
 7. Optional: save a grid of generated digits to a PNG.
+8. Optional (`--plot-latent`): embed the test set's latent codes to 2-D and
+   scatter by class to visualize separation. Two methods:
+   - `tsne` (default, needs scikit-learn): non-linear, best at revealing
+     clusters; stars mark each class's empirical centroid in the embedding
+     (the learned means collapse to the centre under a neighbour-preserving
+     embedding, so plotting them would mislead).
+   - `pca` (pure torch, no extra deps): linear fallback; stars are the actual
+     learned means `mu_y` projected into the same plane. Dominated by
+     top-variance directions, which need not be the class-separating ones.
+   Robust axis limits (1st–99th percentile) keep a few far-flung latents from
+   crushing the view.
 
-Each piece (build, loss, train step, eval, sample) is a small standalone
+Each piece (build, loss, train step, eval, sample, plot) is a small standalone
 function so it can be read and tested in isolation.
 
 ## Environment
